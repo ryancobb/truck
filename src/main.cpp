@@ -1,89 +1,195 @@
+#include "Arduino.h"
+#include "FastLED.h"
 #include "M5CoreInk.h"
 #include "UNIT_ENCODER.h"
-#include "WiFi.h"
-#include "secrets.h"
 
-UNIT_ENCODER sensor;
+#define NUM_LEDS 144
+#define DATA_PIN 25
+
+CRGB colors[] = {CRGB::FairyLightNCC, CRGB::WhiteSmoke, CRGB::DarkRed};
+CRGB leds[NUM_LEDS];
 
 Ink_Sprite InkPageSprite(&M5.M5Ink);
+UNIT_ENCODER encoder;
 
-char ssid[] = SECRET_SSID;
-char pass[] = SECRET_PASS;
-int status = WL_IDLE_STATUS;
+bool colorPickMode = false;
+bool currentButtonState;
+bool lastButtonState;
+bool powerStatus = 0;
 
-void ButtonTest(char* str){
-  InkPageSprite.clear();  //clear the screen.
-  InkPageSprite.drawString(0,59,str);  //draw the string.
-  InkPageSprite.pushSprite(); //push the sprite.
-  delay(2000);
-}
+int bounceTime = 50;
+int colorSelect = 0;
+int doubleTime = 500;
+int held = 0;
+int holdTime = 250;
+int encoderSampleRate = 1000;
 
-void setupWifi() {
-  while (status != WL_CONNECTED) {
-    InkPageSprite.drawString(10, 10, "Attempting to connect to ");
-    InkPageSprite.drawString(10, 25, ssid);
-    InkPageSprite.pushSprite();
+long lastSwitchTime = 0;
+long pressTime = 0;
+long encoderSampleTime;
 
-    status = WiFi.begin(ssid, pass);
-    delay(10000);
-  }
+signed short int currentEncoderValue;
+signed short int lastEncoderValue;
 
-  char IP[] = "xxx.xxx.xxx.xxx";
-  IPAddress ip = WiFi.localIP();
-  ip.toString().toCharArray(IP, 16);
-
-  InkPageSprite.clear();
-  InkPageSprite.drawString(10, 10, "WiFi Connected!");
-  InkPageSprite.drawString(10, 25, IP);
-  InkPageSprite.pushSprite();
-}
+uint8_t brightnessStep = 10;
+uint8_t currentBrightness;
+uint8_t maxBrightness = 170;
+uint8_t powerOnBrightness = 120;
 
 void setup() {
-  M5.begin(); //Initialize CoreInk.
-  if( !M5.M5Ink.isInit()){  //check if the initialization is successful.
-    Serial.printf("Ink Init faild");
-  }
-  M5.M5Ink.clear(); //Clear the screen.
-  delay(1000);
-  //creat ink Sprite.
-  if( InkPageSprite.creatSprite(0,0,200,200,true) != 0 ){
-    Serial.printf("Ink Sprite creat faild");
-  }
+  M5.begin();
+  M5.M5Ink.clear();
 
-  // setupWifi();
+  delay(500);
 
-  sensor.begin();
+  InkPageSprite.drawString(20, 20, "Booted successfully :)");
+  InkPageSprite.pushSprite();
+
+  encoder.begin();
+  currentButtonState = encoder.getButtonStatus();
+  currentEncoderValue = encoder.getEncoderValue();
+  encoder.setLEDColor(0, CRGB::Black);
+
+  currentBrightness = powerOnBrightness;
+  FastLED.addLeds<WS2812B, DATA_PIN, GRB>(leds, NUM_LEDS);
+  FastLED.setBrightness(currentBrightness);
+  FastLED.show();
 }
 
-signed short int last_value = 0;
+void setColor() {
+  for (int i = 0; i < NUM_LEDS; i++) {
+    leds[i] = colors[colorSelect];
+  }
+
+  FastLED.show();
+}
+
+void nextColor() {
+  if (colorSelect == 2) {
+    colorSelect = 0;
+  } else {
+    colorSelect++;
+  }
+
+  setColor();
+}
+
+void previousColor() {
+  if (colorSelect == 0) {
+    colorSelect = 2;
+  } else {
+    colorSelect--;
+  }
+
+  setColor();
+}
+
+void brightenLeds() {
+  currentBrightness =
+      constrain(brighten8_lin(currentBrightness), 0, maxBrightness);
+  FastLED.setBrightness(currentBrightness);
+  FastLED.show();
+}
+
+void dimLeds() {
+  currentBrightness = constrain(dim8_lin(currentBrightness), 0, maxBrightness);
+  FastLED.setBrightness(currentBrightness);
+  FastLED.show();
+}
+
+void handleEncoder() {
+  if (colorPickMode) {
+    if ((millis() - encoderSampleTime) > encoderSampleRate) {
+      currentEncoderValue = encoder.getEncoderValue();
+
+      if (currentEncoderValue > lastEncoderValue) {
+        nextColor();
+      } else if (currentEncoderValue < lastEncoderValue) {
+        previousColor();
+      }
+
+      lastEncoderValue = currentEncoderValue;
+      encoderSampleTime = millis();
+    }
+  } else {
+    lastEncoderValue = currentEncoderValue;
+    currentEncoderValue = encoder.getEncoderValue();
+
+    if (currentEncoderValue > lastEncoderValue) {
+      brightenLeds();
+    } else if (currentEncoderValue < lastEncoderValue) {
+      dimLeds();
+    }
+  }
+}
+
+void enterColorPickMode() {
+  colorPickMode = true;
+  encoder.setLEDColor(0, CRGB::Red);
+}
+
+void exitColorPickMode() {
+  colorPickMode = false;
+  encoder.setLEDColor(0, CRGB::Black);
+}
+
+void turnOn() {
+  setColor();
+}
+
+void turnOff() {
+  for (int i = 0; i < NUM_LEDS; i++) {
+    leds[i] = CRGB::Black;
+  }
+
+  FastLED.show();
+}
+
+void handleButton() {
+  lastButtonState = currentButtonState;
+  currentButtonState = encoder.getButtonStatus();
+
+  // first pressed
+  if (currentButtonState == 0 && lastButtonState == 1) {
+    pressTime = millis();
+  }
+
+  // held
+  if (powerStatus && currentButtonState == 0 && lastButtonState == 0) {
+    if ((millis() - pressTime) > holdTime) {
+      held = 1;
+
+      enterColorPickMode();
+    }
+  }
+
+  // released
+  if (currentButtonState == 1 && lastButtonState == 0) {
+    if (millis() - holdTime > bounceTime) {
+      if (held == 1) {
+        held = 0;
+      } else {
+        if (colorPickMode) {
+          exitColorPickMode();
+        } else {
+          powerStatus = !powerStatus;
+
+          if (powerStatus) {
+            turnOn();
+          } else {
+            turnOff();
+          }
+        }
+      }
+    }
+  }
+}
 
 void loop() {
-  signed short int encoder_value = sensor.getEncoderValue();
-  bool btn_status = sensor.getButtonStatus();
+  handleEncoder();
+  handleButton();
 
-  if (last_value != encoder_value) {
-    if (last_value < encoder_value) {
-      sensor.setLEDColor(1, 0x000011);
-    } else {
-      sensor.setLEDColor(2, 0x111100);
-    }
-    last_value = encoder_value;
-  } else {
-    sensor.setLEDColor(0, 0x001100);
-  }
-  if (!btn_status) {
-    sensor.setLEDColor(0, 0xC800FF);
-  }
-  delay(20);
+  M5.update();
 
-
-    // if( M5.BtnUP.wasPressed()) ButtonTest("Btn UP Pressed");  //Scroll wheel up.
-    // if( M5.BtnDOWN.wasPressed()) ButtonTest("Btn DOWN Pressed");  //Trackwheel scroll down.
-    // if( M5.BtnMID.wasPressed()) ButtonTest("Btn MID Pressed");  //Dial down.
-    // if( M5.BtnEXT.wasPressed()) ButtonTest("Btn EXT Pressed");  //Top button press.
-    // if( M5.BtnPWR.wasPressed()){  //Right button press.
-    //     ButtonTest("Btn PWR Pressed");
-    //     M5.shutdown();  //Turn off the power, restart it, you need to wake up through the PWR button.
-    // }
-  // M5.update();  //Refresh device button.
+  delay(50);
 }
